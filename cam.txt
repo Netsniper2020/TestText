@@ -1,0 +1,565 @@
+#include <SPI.h>
+// La commande STANDBY met le LLCC68 dans le mode veille (sleep qui comsomme peut et attend une commande SPI
+// à la fin de la commande de transmission TX_SEND et la commande de réception RX_READ, il y a une commande STANDBY 
+/****************************** MESSAGE TX *******************************************/                                                                           
+byte write_buffer[] = {0x0E, 0x80, 0x0F, 
+0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 
+0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F}; // page 58, 73
+/* byte write_buffer[] = {0x0E, 0x80, 0x7F,   
+                      0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+                      0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,                      
+                      0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,                      
+                      0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,                      
+                      0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
+                      0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F,                      
+                      0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,                      
+                      0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,                                          
+                      }; // page 58, 73
+// octet 1 : commande d'écriture dans le tampon (OPcode), // octet 2 : 0x80 est l'emplacement de la zone TX dans le Buffer
+// octet 3 : longueur du message 0x7F = 128 octets // les octets suivant sont le message à transmettre */
+
+
+
+//******************* Attribution des broches **********************
+byte busy_pin = 8;                                                                           
+byte Chip_Select = 9;                                                                                                                                        
+byte Packet_RX = 7; // DIO1 indicateur de paquet valide reçu                                                                        
+
+byte TX_LED = A0;                                                                             
+byte RX_LED = A1;
+byte LED_OK = A2;
+byte SW_1 = A3; // bouton SW_1 enfoncé => mode RX, bouton SW_1 NON enfoncé => mode TX 
+// si digitalRead(SW_1) = 0 on est en mode RX (attente de réception de message) et on exécute la partie RX du Loop
+// si digitalRead(SW_1) = 1 on est en mode TX (pas d'attente de réception de message, on sort de la boucle RX
+// d'attente de réception valide wait et on exécute la partie TX du Loop
+byte Inter_TX = A4;
+byte Inter_RX = A5;
+byte Reset = 10;                                                               
+byte LED_Message_OK = 0;
+// byte Packet_RX_OK = 0;
+//******************** Définitions des variables *****************
+byte Size = 0;                                                                               
+byte byte1 = 0;                                                                              
+byte byte2 = 0;                                                                              
+byte byte3 = 0;                                                                              
+byte byte4 = 0;                                                                              
+byte valeur = 0;
+byte LongueurPaquet = 0;
+byte ReadRegister0889[] = {0x1D, 0x08, 0x89};
+byte WriteRegister0889[] = {0x0D, 0x08, 0x89, valeur};
+byte ReadRegister08D8[] = {0x1D, 0x08, 0xD8};
+byte WriteRegister08D8[] = {0x0D, 0x08, 0xD8, valeur};
+byte ReadRegister0902[] = {0x1D, 0x09, 0x02};
+byte WriteRegister0902[] = {0x0D, 0x09, 0x02, valeur};
+byte ReadRegister0944[] = {0x1D, 0x09, 0x44};
+byte WriteRegister0944[] = {0x0D, 0x09, 0x44, valeur};
+byte ReadRegister0736[] = {0x1D, 0x07, 0x36};
+byte WriteRegister0736[] = {0x0D, 0x07, 0x36, valeur};
+//************************** Commandes Generales *****************
+byte standby[] = {0x80, 0x01}; // voire page 63, mise en mode veille (SetStandBy) = attente d'instruction SPI 
+// octet 1 : 0x00, fonctionnement sur oscillateur RC 13 MHz, 0x01, fonctionnement sur quartz 32 MHz
+byte regulator[] = {0x96, 0x00};  // page 69, régulateur de tension LDO
+byte pa_config[] = {0x95, 0x04, 0x07, 0x00, 0x01};  // page 71 et 79, ampli de puissance
+// 30/22 dBm = 0x04 0x07 0x00 0x01, 28/20 dBm = 0x03 0x05 0x00 0x01
+// 25/17 dBm = 0x02 0x03 0x00 0x01, 22/14 dBm = 0x02 0x02 0x00 0x01
+byte get_status[] = {0xC0}; // affichage du status du modulebyte PayloadLengthRx = 0;
+/************************* FSK **************************/
+byte fsk[] = {0x8A, 0x00};    // page 78, PACKET_TYPE_GFSK (0x00)
+byte modulation_fsk[] = {0x8B, 0x01, 0xA0, 0xAA, 0x00, 0x1A, 0x00, 0x7A, 0xE1};   // page 80, 8 paramètres de modulation du signal
+// octets 1, 2 et 3 : 0x01A0AA = 106666 = BR = 32 x Fxtal / débit binaire, où Bit Rate = débit binaire = 4,8kb/s par défaut (page 80)
+// BR = 32 x 106666 / 4800 = 711,1067 baud/s, le débit binaire = 0,6 à 300 kb/s (page 18, 38 et 80)
+// octet 4, filtrage de l'impulsion donnant la forme de l'impulsion :
+// 0x00 pas de filtre, 0x08 filtre Gaussien BT 0,3, 0x09 filtre Gaussien BT 0,5, 0x0A filtre Gaussien BT 0,7, 0x0B filtre Gaussien BT 1
+// octet 5, bande passante BW (page 38 et 81), 0x1A pour BW=156,2kHz, mini 0x1F pour BW=4,8kHz à 0x09 pour BW=467kHz (voir tableau page 81)
+// octets 6, 7 et 8 : 0x007AE1 = Fdev = (modulation de la fréquence x 2^25) / Fxtal
+byte packet_params_fsk[] = {0x8C, 0x00, 0x20, 0x05, 0x10, 0x00, 0x00, 0x0D, 0x00, 0x00}; // page 83 à 86
+// octets 1 & 2 = 0x0020 = longueur du préambule du message de transmission (page 83)
+// octet 3 = 0x05 = longueur du détecteur de préambule 16 bits, 0x00 = désactivé, 0x04 = 8 bits (1 octet), 0x05 = 16 bits (2 octets)
+// 0x06 = 24 bits (3 octets), 0x07 = 32 bits (4 octets
+// octet 4 = 0x10 = 16 bits = longueur du mot de synchronisation en bits ( entre 0x00 et 0x40 bits soit 0 à 8 octets) page 83 et 84
+// octet 5 = 0x00 = filtrage d'adresse, 0x00 = désactiver, 0x01 = Filtrage d'adresse activé sur l'adresse du noeud
+// 0x02 = activé sur adresses noeud et diffusion (voir page 84 pour l'adresse noeud (registre 0x06CD) et adresse diffusion (registre 0x06CE))
+// octet 6 = 0x00 = le type de paquet : page 85, 0x00 = la longueur du paquet est connue par le module d'emission et par le module de réception, 
+// (la taille ne sera pas ajoutée aux paquets transmis)
+// octet 7 = 0x0D = longueur en octets ou taille maximum du message que le récepteur peut accepter (0x00 à 0xFF)
+// octet 8 = 0x00 = type de CRC (page 85), 0x01 = Pas de CRC, 0x00 = CRC calculé sur 1 octet, 0x02 = CRC calculé sur 2 octets
+// 0x04 = CRC calculé sur 1 octet et inversé, 0x06 = CRC calculé sur 2 octets et inversé
+// la valeur initiale du CRC est au registre 0x06BC (0x1D par défaut) pour le MSB et 0x06BD (0x0F par défaut) pour le LSB (page 85), 
+// la valeur polynomiale du CRC est au registre 0x06BE (0x10 par défaut) pour le MSB et 0x06BF (0x21 par défaut) pour le LSB (page 86)
+// octet 9 = encodage (page 86), 0x00 = pas d'encodage, 0x01 = activer le blanchiment. Les valeurs initiales de blanchiment sont pour le MSB et
+// au registre 0x06B8 (valeur par défaut 0x01) et pour le LSB au registre 0x06B9 (valeur par défaut 0x00)
+/*************************** LORA  ******************************/
+byte lora[] = {0x8A, 0x01};    // page 78, PACKET_TYPE_LORA (0x01)    
+byte modulation_lora[] = {0x8B, 0x07, 0x04, 0x01, 0x00};   // page 11, 19, 32, 58 et 82
+// octet 1 : Spreading Factor (facteur d'étalement) : sensibilité et temps de transmission
+// 0x05 = SF5 (gain du SNR = -2,5 dB, étalement = 2^SF = 32), 0x06 = SF6 (gain du SNR = -5 dB, étalement = 2^SF = 64)
+// 0x07 = SF7 (gain du SNR = -7,5 dB, étalement = 2^SF = 128), 0x08 = SF8 (gain du SNR = -10 dB, étalement = 2^SF = 256)
+// 0x09 = SF9 (gain du SNR = -12,5 dB, étalement = 2^SF = 512), 0x0A = SF10 (gain du SNR = -15 dB, étalement = 2^SF = 1024)
+// 0x0B = SF11 (gain du SNR = -17,5 dB, étalement = 2^SF = 2048)
+// octet 2 : BW, Bande Passante de la modulation, 
+// 0x04 = 125kHz (valeur de SF = 5 - 6 - 7 - 8 et 9), si BW = 125kHz, SF=7 sensibilité = -124dBm, SF=9 sensibilité = -129dBm
+// 0x05 = 250kHz (valeur de SF = 5 - 6 - 7 - 8 - 9 et 10), si BW = 250kHz, SF=7 sensibilité = -121dBm, SF=10 sensibilité = -129dBm
+// 0x06 = 500kHz (valeur de SF = 5 - 6 - 7 - 8 - 9 - 10 et 11), si BW = 500kHz, SF=7 sensibilité = -117dBm, SF=11 sensibilité = -127dBm
+// octet 3 : CR (Coding Rate ou taux de codage d'erreur (améliore la fiabilité de la liaison)
+// 0x01 = CR = 4/5 (augmentation du TX = 1,25), 0x02 = CR = 4/6 (augmentation du TX = 1,5)
+// 0x03 = CR = 4/7 (augmentation du TX = 1,75), 0x04 = CR = 4/8 (augmentation du TX = 2)
+// octe 4 : LDRO : LowDataRateOptimize = Optimisation du faible débit de données (obligatoire si SF > 9)
+// 0x00 = LowDataRateOptimize OFF, 0x01 = LowDataRateOptimize ON (activé)
+byte packet_params_lora[] = {0x8C, 0x00, 0x0C, 0x00, 0x0F, 0x01, 0x00, 0x0D, 0x00, 0x00}; // page 86 à 87
+// octet 1 et 2 = 0x000C = longueur du préambule du message de transmission (page 83)
+// octet 3 = 0x00 = type d'entête, 0x00 = longueur variable du paquet (en-tête explicite), 0x01 = longueur fixe du paquet (en-tête implicite)
+// octet 4 = 0x00 à 0xFF taille maximale du paquet que le récepteur peut accepter (page 87)
+// octet 5 = 0x01 = Type de CRC (page 87), 0x00 = CRC désactivé, 0x01 = CRC activé
+// octet 6 = 0x00 = inversion ou pas de IQ : page 87, 0x00 = IQ standard (non inversé), 0x01 = IQ inversé
+// octet 7 = 0x0D = longueur en octets ou taille maximum du message que le récepteur peut accepter (0x00 à 0xFF)
+// octet 8 = 0x00 = type de CRC (page 85), 0x01 = Pas de CRC, 0x00 = CRC calculé sur 1 octet, 0x02 = CRC calculé sur 2 octets
+// 0x04 = CRC calculé sur 1 octet et inversé, 0x06 = CRC calculé sur 2 octets et inversé
+// la valeur initiale du CRC est au registre 0x06BC (0x1D par défaut) pour le MSB et 0x06BD (0x0F par défaut) pour le LSB (page 85), 
+// la valeur polynomiale du CRC est au registre 0x06BE (0x10 par défaut) pour le MSB et 0x06BF (0x21 par défaut) pour le LSB (page 86)
+// octet 9 = encodage (page 86), 0x00 = pas d'encodage, 0x01 = activer l'encodage. Les valeurs initiales d'encodage sont pour le MSB
+// à l'adresse registre 0x06B8 (valeur par défaut 0x01) et pour le LSB à l'adresse registre 0x06B9 (valeur par défaut 0x00)
+/******************** Paramètres généraux ******************************/
+byte frequency[] = {0x86, 0x36, 0x57, 0xE9, 0xBE};  // (page 78), fréquence (page 78), octet 1 à 4 : 0x3657E9BE = 911731134 = RfFreq, 
+// fréquence d'émission = RFfrequency = (RfFreq x Fxtal) / 2^25, RFfrequency = (911731134 x 32000000) / 33554432 = 869494566 Hz
+byte calib_image[] = {0x98, 0xD7, 0xDB}; // pages 51, 52 et 57, étalonnage de l'image en fréquence
+// octet 1 = freq1 = 0xD7 pour la bande 863-870 MHz (valeur par défaut), octet 2 = freq2 = 0xDB pour la bande 863-870 MHz (valeur par défaut)
+byte dio2[] = {0x9D, 0x01};  // page 58 et 76, attribution de DIO2, 0x00 le module passe en SLEEP, STDBY_RX, STDBY_XOSC, FS et RX
+// 0x01 = activer DIO2 pour qu'il contrôle un commutateur RF pour RX/TX
+byte ocp[] = {0x08, 0xE7, 0x38}; // page 58, protection contre les surintensités
+byte clear_deviceErrors[] = {0x07, 0x00}; // page 59, effacement des erreurs du module
+byte clear_IRQ[] = {0x02, 0xFF, 0xFF}; // page 75, effacement des drapeaux IRQ
+byte buffer_base[] = {0x8F, 0x80, 0x00};  // page 59, adresse du tampon pour TX puis RX
+byte set_sync[] = {0x0D, 0x06, 0xC0, 0x2D, 0xD4}; // octets de synchronisation
+byte irq_param[] = {0x08, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00}; // page 74 et 75, paramètres pour IRQ
+byte GetRxBufferStatus[] = {0x13}; // page 91, longueur du dernier message reçu (PayloadLengthRx) puis adresse du premier octet reçu (RxStartBufferPointer)
+byte GetPacketStatus[] = {0x14}; //page 59 et 91, 92, 
+// FSK renvoie : RssiAvg, RssiSync, PStatus2, PStatus3, PStatus4)
+// LORA renvoie : octet 1 : RssiPkt (moyenne puissance reçu (RSSI) du dernier packet reçu, RSSI = RssiPkt / 2 en dBm
+// octet 2 : SnrPkt SNR du dernier packet reçu (format : complément à 2) puis x 2, SNR = SnrPkt / 4 en dB (page 92)
+// octet 3 : SignalRssiPkt RSSI du signal LORA (après dé-étalement) du dernier packet reçu, RSSI = -SignalRssiPkt / 2 en dB
+byte GetRssiInst[] = {0x15}; // page 59 et 92 ajouté par GB, pour FSK et LORA, renvoie le RSSI du dernier packet, RSSI est -RssiInst / 2 en dBm
+byte GetStats[] = {0x10}; // (page 92), statistiques depuis la dernière commande ResetStats
+// GFSK octet 1 : RFU, octet 2 : Statut, octets 3 et 4 : NbPkReceived(15:0), octets 5 et 6 : NbPktCrcError(15:0), octets 7 et 8 : NbPktLengthError(15:0)
+// LORA  // (page 92), octet 1 : RFU, octet 2 : Statut, octets 3 et 4 : Nombre total de packet reçu NbPkReceived(15:0), 
+// octets 5 et 6 : nombre de packet avec un CRC erroné NbPktCrcError(15:0), octets 7 et 8 : nombre de packet avec un entête erroné NbPktHeaderErr(15:0)
+byte ResetStats[] = {0x00}; // réinitialises toutes les valeurs de GetStats (la commande complète est {0x00 0x00 0x00 0x00 0x00 0x00 0x00}  
+byte SetCadParams[] = {0x88, 0x00, 0x03, 0x03, 0x00, 0x00, 0xFF}; // pages 36, 59 et 87 à 88, pour faire, en LORA, une détection d'activité de canal (CAD)
+// octet 1 : cadSymbolNum
+// octet 2 : cadDetPeak, sensibilité lors de la corrélation avec les symboles du préambule, Nb de symboles dans le préambule : 0x03 = 8, 0x04 = 16
+// octet 3 : cadDetMin, sensibilité lors de la corrélation avec les symboles du préambule, Nb de symboles dans le préambule : 0x03 = 8, 0x04 = 16
+// octet 4 : cadExitMode, action après exécution : 0x00 = retour en mode STBY_RC, 0x01 = reste en RX jusqu'à paquet ou délai cadTimeOut * 15,625 us
+// octet 5 à 7 : cadTimeout, délai après exécution = 0x0000FF valeur du TimeOut = cadTimeOut * 15,625 us
+byte MSB = 0x00;
+byte LSB = 0x00;
+byte Data = 0x00; 
+byte offset = 0x00;
+byte WriteRegister[] {0x0D, MSB, LSB, Data}; // ECRIRE dans un registre de la mémoire la valeur "Data[0:n]" à l'adresse MSB+LSB
+// voir exemple dans le programme RX à la ligne 292
+byte ReadRegister[] {0x1D, MSB, LSB}; // LIRE la valeur dans le registre à l'adresse MSB+LSB
+byte WriteBuffer[] {0x0E, offset, Data}; // ECRIRE la valeur data[0:n] dans le buffer FIFO, offset est l'emplacement dans le Buffer
+// voir exemple dans le programme TX à la ligne 305
+byte ReadBuffer {0x1E}; //page 73, offset optionnelle, utilisé si différent de 0) LIRE les valeurs du Buffer FIFO,
+// les octets successifs doivent être extrait un à un par une boucle contenant "byte1 = SPI.transfer(0x00);"
+byte rx_gain[] = {0x0D, 0x08, 0xAC, 0x96}; // page 53, Paramètres du gain du récepteur, valeur à écrire dans le registre mémoire 0x08AC (page 61)                                             
+//  0x94 = gain standard, par défaut, 0x96 = gain augmenté, 
+byte rx_mode[] = {0x82, 0x00, 0x00, 0x00};  // page 64 et 65                                                
+// Commande pour mettre le module LLCC68 en mode RX (récepteur) en continu ou avec un délai
+// 0x000000 pas de délai d'attente, Mode Rx un coup (jusqu'à une réception) puis revient au mode STBY_RC
+// 0xFFFFFF mode Rx en continu (jusqu'à une demande de changement de mode), permet de recevoir un nombre illimité de paquets
+// 0xXXXXXX = 262 secondes maximum, délai pendant lequel le module reste en mode Rx, à la fin du délai ou si un paquet est
+// reçu et après réception complète du paquet, retour dans le mode STBY_RC
+byte tx_params[] = {0x8E, 0x16, 0x06};   // page 58, 71 et 79, Paramètres commun TX en mode GFSK ou LORA
+// octet 1 : 0xF7=-9dBm, 0xF8=-8dBm, 0xF9=-7dBm, 0xFA=-6dBm, 0xFB=-5dBm, 0xFC=-4dBm, 0xFD=-3dBm, 0xFE=-2dBm, 
+// 0xFF=-1dBm, 0x00=0dBm, 0x01=1dBm, 0x02=2dBm, 0x03=3dBm, 0x04=4dBm, 0x05=5dBm, 0x06=6dBm, 0x07=7dBm, 0x08=8dBm, 
+// 0x09=9dBm, 0x0A=10dBm, 0x0B=11dBm, 0x0C=12dBm, 0x0D=13dBm, 0x0E=14dBm, 0x0F=15dBm, 0x10=16dBm, 0x11=17dBm, 
+// 0x12=18dBm, 0x13=19dBm, 0x14=20dBm, 0x15=21dBm, 0x16=22dBm
+// octet 2 = temps de la rampe de puissance pour atteindre la pleine  puissance : 0x00 = 10us, 0x01 = 20us,
+// 0x02 = 40us, 0x03 = 80us, 0x04 = 200us, 0x05 = 800us, 0x06 = 1700us, 0x07 = 3400us 
+
+byte tx_mode[] = {0x83, 0x00, 0x00, 0x00};  // page 63 et 64, Commande la valeur de la rampe de démarrage du PA, les 3 octets 
+// déterminent le temps de la rampe d'arrêt (Timeout) du PA selon la formule : Durée du Timeout = Timeout x 15,625 microsecondes
+
+void setup() { // Setup programme
+  delay(3000); //délai pour que l'alim du module E220 et le Reset de son MCU interne soit fait 
+  Serial.begin(9600); // Démarre la communication série entre l'arduino et le PC
+
+  pinMode(TX_LED, OUTPUT); // Définit la broche TX_LED (4) blanche comme une sortie                                                                    
+  digitalWrite(TX_LED, LOW); // La TX_LED est éteinte par défaut
+  pinMode(RX_LED, OUTPUT); // Définit la broche RX_LED (5) verte comme une sortie                                                                    
+  digitalWrite(RX_LED, LOW); // La RX_LED est éteinte par défaut
+  pinMode(LED_OK, OUTPUT); // Définit la broche LED_OK (A1) bleu comme une sortie 
+  digitalWrite(LED_OK, LOW); // La LED_OK est éteinte par défaut
+  pinMode(Inter_RX, OUTPUT); // Définit la broche LED_OK (A1) bleu comme une sortie 
+  digitalWrite(Inter_RX, LOW); // La LED_OK est éteinte par défaut
+  pinMode(Inter_TX, OUTPUT); // Définit la broche LED_OK (A1) bleu comme une sortie 
+  digitalWrite(Inter_TX, LOW); // La LED_OK est éteinte par défaut
+  pinMode(SW_1, INPUT_PULLUP); // Définit la broche Switch 1 sur l'entrée avec la résistance pullup interne activée  
+  
+  pinMode(Chip_Select, OUTPUT); // Définit la broche de sélection de puce sur la sortie  
+  pinMode(busy_pin, INPUT); // Définit la broche occupée sur l'entrée  
+  pinMode(Reset, OUTPUT);
+  pinMode(Packet_RX, INPUT); 
+  digitalWrite(Reset, HIGH);
+
+  delay(10); // maintenir la pin Reset à 1 pendant 10 ms sinon pas de Reset  
+  SPI.begin(); // Démarre la communication SPI entre l'arduino et le module LLCC68 avec les paramètres SPI standard    
+  Lora_setup(); // Initialise le module LLCC68 en mode LoRa
+  // Fsk_setup(); // Initialise le module LLCC68 en mode GFSK
+  TXRX_Setup(); // Setup LLCC68 commun aux mode TX et RX
+} 
+void loop() { // Loop dédié mode RX
+  // Size = sizeof(standby); // met la taille du tableau dans la variable 
+  // transmit(standby, Size); // fonction de transmission pour mettre en standby                                                                     
+  // Status(); // Obtient le statut du module LLCC68  
+    if(digitalRead(SW_1) == 0) {
+      digitalWrite(Inter_RX, HIGH);
+      digitalWrite(Inter_TX, LOW);
+      RX_Setup(); // Setup LLCC68 spécifique au mode RX
+      //delay(500);
+      RX_Wait(); // attendre que le LLCC68 recoive un message valide   
+      RX_Read(); // Appelle la fonction de RX suivit de la lecture de la partie du Buffer RX
+      Message_OK(); // émission d'un son buzzer et allumage d'une LED, si une lettre A est reçu (à n'importe quelle position du message)
+      // Affichage_GetRxBufferStatus(); // afficher la longueur du dernier message 
+      Affichage_GetRssi(); // Affichage des paramètres du RSSI moyenné, SDR et RSSI instantané sur le PC
+      Affichage_GetRssiInst(); // Affichage des paramètres du RSSI instantané (ne fonctionne pas !) sur le PC
+      Affichage_GetStats(); // Affichage des 3 statistiques de réception sur le PC
+      Affichage_GetRxBufferStatus();
+      // afficher la longueur du dernier message
+      Modulation_BW500k();
+      // fonction devant être exécuté avant chaque lancement de Read()
+    }
+    else {
+      digitalWrite(Inter_RX, LOW);
+      digitalWrite(Inter_TX, HIGH);
+      // Size = sizeof(standby); // met la taille du tableau dans la variable 
+      // transmit(standby, Size); // fonction de transmission pour mettre en standby                                                                     
+      // Status(); // Obtient le statut du module LLCC68  
+      Modulation_BW500k(); // fonction devant être exécuté avant chaque transmission si BW500k (correction du LLCC68)
+      TX_Setup(); // Setup LLCC68 spécifique au mode TX
+      delay(500);    
+      TX_Send(); // met les datas dans le Buffer TX et transmet le contenu de la partie du Buffer TX dans l'air
+      delay(2000);
+    }
+}
+void Modulation_BW500k() { // si BW=500k doit être exécuté avant TX, voire page 97 15.1.1 (correction du LLCC68)
+  digitalWrite(Chip_Select, LOW);
+  if(modulation_lora[2] == 6) {
+    SPI.transfer(ReadRegister0889);
+    valeur = SPI.transfer(0x00);
+    valeur = valeur & 0xFB;
+    SPI.transfer(WriteRegister0889);
+  }
+  else {
+    SPI.transfer(ReadRegister0889);
+    valeur = SPI.transfer(0x00);
+    valeur = valeur | 0x04;
+    SPI.transfer(WriteRegister0889);
+  }
+  digitalWrite(Chip_Select, HIGH);
+}
+void Decalage_Antenne() { // 0x08D8 est le registre TxClampConfig qu'il faut modifier pour éviter 
+// le seuil de serrage du PA de 5 à 6 dBm, page 98 15.2.1 (correction du LLCC68)
+  digitalWrite(Chip_Select, LOW);
+  SPI.transfer(ReadRegister08D8);
+  valeur = SPI.transfer(0x00);
+  valeur = valeur | 0x1E; // mise à 0b00011110 du registre 0x08D8
+  SPI.transfer(WriteRegister08D8);
+  digitalWrite(Chip_Select, HIGH);
+}
+void Tempo_Implicite() { // Tempo_Implicite, si RX, ajoute Rx + TimeOut actif + entête Implicite, 
+// page 97 15.3.1 (correction du LLCC68)
+  digitalWrite(Chip_Select, LOW);
+  valeur = 0x00;
+  SPI.transfer(WriteRegister0902); // arrête le timer RTC
+  SPI.transfer(ReadRegister0944);
+  valeur = SPI.transfer(0x00);
+  valeur = valeur | 0x02;
+  SPI.transfer(WriteRegister0944); // effacement de l'événement
+  digitalWrite(Chip_Select, HIGH);
+}
+void IQ_Inverse() { // si IQ inversé, 0x0736 est le registre IQ Polarity Setup à modifier pour éviter 
+// la perte de paquet, page 98 15.4.1 (correction du LLCC68)
+  // ajouter if IQ inverse
+digitalWrite(Chip_Select, LOW);
+  SPI.transfer(ReadRegister0736);
+  valeur = SPI.transfer(0x00);
+  valeur = valeur | 0x04; // correctif pour ne pas perdre de paquet
+  SPI.transfer(WriteRegister0736);
+digitalWrite(Chip_Select, HIGH);
+}
+void Message_OK(){ // activation pendant 100ms du Buzzer
+  if(LED_Message_OK == 1){
+    // tone(3,100,300);
+    digitalWrite(LED_OK, HIGH);
+    delay(500);
+    digitalWrite(LED_OK, LOW);
+    // delay(200);
+    LED_Message_OK = 0;
+  }
+}  
+void busy() { // boucle d'attente du LLCC68 non occupé, voire page 45 à 54 et 94  
+  while (digitalRead(busy_pin) == 1) { // Attendrez tant que le module LLCC68 est occupé                                                             
+  }
+}
+
+//*************************** Fonction WAIT ******************************************
+void RX_Wait() { 
+  Serial.println("debut RX_Wait");                                                                           
+  // Fonction d'attente de paquet valide
+  while ((digitalRead(Packet_RX) + digitalRead(SW_1)) == 0) {                                                            
+  // Attendre jusqu'à ce qu'un paquet valide soit reçu ou que SW_1 = 1 (inter ouvert)
+  }
+  delay(100);
+    // Serial.println("pas de packet valide"); // ajout GB  (indispensable sans cela ça ne marche pas)
+  
+  /****************** debut de allumage LED RX *******************************/
+  digitalWrite(RX_LED, HIGH);                                                              
+  // Clignote la LED RX pour montrer le paquet reçu
+  delay(1000);
+  digitalWrite(RX_LED, LOW); 
+  /****************** fin de allumage LED RX *******************************/
+
+    Serial.println("fin RX_Wait"); 
+}
+
+void TXRX_Setup(){ // Setup LLCC68 commun aux modes RX et TX
+  // Size = sizeof(standby); // met la taille du tableau dans la variable 
+  // transmit(standby, Size); // fonction de transmission pour mettre en standby                                                                     
+  // Status(); // Obtient le statut du module LLCC68  
+    Size = sizeof(clear_deviceErrors); // acquisition taille du tableau des paramètres de la fonction
+    transmit(clear_deviceErrors, Size); // Appelle la fonction pour paramètrer l'effacement des erreurs                                                       
+    Size = sizeof(clear_IRQ); // acquisition taille du tableau des paramètres de la fonction
+    transmit(clear_IRQ, Size);  // Appelle la fonction pour l'effacement des IRQ                                                              
+    Size = sizeof(buffer_base); // acquisition taille du tableau des paramètres de la fonction
+    transmit(buffer_base, Size);// définition du début du buffer pour le mode TX (ici 0x80) et RX (0x00)                                                          
+    Size = sizeof(set_sync); // acquisition taille du tableau des paramètres de la fonction
+    transmit(set_sync, Size); // Appelle la fonction pour paramétrer l'octet de synchronisation                                                                  
+    Size = sizeof(irq_param); // acquisition taille du tableau des paramètres de la fonction
+    transmit(irq_param, Size);  // Appelle la fonction pour paramétrer les IRQ 
+}
+void TX_Setup() { // Setup spécifique au mode TX
+  TXRX_Setup(); // Setup LLCC68 commun aux mode TX et RX (Indispensable à cet endroit)
+  Size = sizeof(standby); // met la taille du tableau dans la variable 
+  transmit(standby, Size); // fonction de transmission pour mettre en standby                                                                     
+  Status(); // Obtient le statut du module LLCC68  
+  Decalage_Antenne(); // 0x08D8 est le registre TxClampConfig qu'il faut modifier pour éviter le seuil de 
+  // serrage du PA, page 98 15.2.1 qui fait perdre 5 à 6 dBm de puissance de TX 
+/*********** Partie seulement RX ****************/        
+    Size = sizeof(tx_params); // acquisition taille du tableau des paramètres de la fonction
+    transmit(tx_params, Size); // Appelle la fonction pour paramètrer le mode TX                                                               
+    Size = sizeof(pa_config); // acquisition taille du tableau des paramètres de la fonction
+    transmit(pa_config, Size);  // Appelle la fonction pour paramètrer TX                                                                
+    Size = sizeof(ocp); // acquisition taille du tableau des paramètres de la fonction
+    transmit(ocp, Size); // Appelle la fonction de transmission pour paramètrer OCP = Protection contre les surintensités                                                                     
+    Size = sizeof(regulator); // acquisition taille du tableau des paramètres de la fonction
+    transmit(regulator, Size); // Appelle la fonction pour paramètrer le régulateur DC DC LDO                                                                                                                           
+}
+void RX_Setup() { // Setup spécifique au mode RX
+/*********** Partie seulement RX ****************/
+  TXRX_Setup(); // Setup LLCC68 commun aux mode TX et RX (Indispensable à cet endroit)
+  // Size = sizeof(standby); // met la taille du tableau dans la variable 
+  // transmit(standby, Size); // fonction de transmission pour mettre en standby                                                                     
+  // Status(); // Obtient le statut du module LLCC68  
+    Size = sizeof(rx_gain); // acquisition taille du tableau des paramètres du gain RX
+    transmit(rx_gain, Size); // Appelle la fonction de transmission pour le gain RX                                                              
+    Size = sizeof(rx_mode); // acquisition taille du tableau des paramètres de la fonction rx_mode
+    transmit(rx_mode, Size); // Appelle la fonction de transmission pour mettre le module LLCC68 en mode récepteur RX                                                                   
+}
+void TX_Send() { // Fonction TRANSMISSION (SEND) TX
+  Size = sizeof(write_buffer); // acquisition taille du tableau des paramètres de la fonction                                                              
+  transmit(write_buffer, Size); // écrire les datas dans le Buffer 
+  Size = sizeof(tx_mode); // acquisition taille du tableau des paramètres de la fonction                                                             
+  transmit(tx_mode, Size); // mettre en mode TX emetteur et envoyer les datas
+  delay(100); // il faut que ce délai soit supérieur à la duré de la transmission dans l'air
+//*******************************************************************************************************
+  Status();   // Obtient le statut du module LLCC68 (supprimé par GB le 15 02 2023)                                                                              
+//********************************************************************************************************
+  Size = sizeof(standby); // acquisition taille du tableau des paramètres de la fonction                                                                   
+  transmit(standby, Size); // mise du LLCC68 en mode veille (sleep)
+  digitalWrite(TX_LED, HIGH); // allume la LED RX 500ms pour montrer le paquet transmis                                                              
+  delay(500);
+  digitalWrite(TX_LED, LOW); // éteint la LED RX qui montre que le paquet est transmis  
+}
+void RX_Read() { // Fonction READ (RECEVOIR) RX, en mode STANDARD
+  busy(); // Vérifie que le module LLCC68 n'est pas occupé                                                                                 
+  digitalWrite(Chip_Select, LOW); // broche de sélection SPI à 0 pour communiquer avec le module LLCC68                                                                   
+  SPI.transfer(ReadBuffer); // Envoie la commande de lecture du tampon (dépend du nombre d'octets envoyés)                                                            
+  byte1 = SPI.transfer(0x00); // Opcode (reçu en début de message)
+  byte2 = SPI.transfer(0x00); // adresse de base du Buffer du TX (reçu en deuxième position du message)
+  byte3 = SPI.transfer(0x00); // nombre d'octets utile envoyé, (valeur ajouté en début du message TX)
+  Serial.print("nombre d'octet envoyé (valeur TX en décimal) : ");
+  Serial.println(byte3); 
+  for (int i = 0; i <= byte3 - 1; i++) {  // la boucle extrait le nombre d'octets envoyé par TX                                                             
+    byte1 = SPI.transfer(0x00); // La commande envoie un octet vide et reçoit en retour un octet 
+    // du message, qu'il attribue à la variable byte1
+    Serial.print(byte1, HEX); // Afficher, une par une, chaque données du message reçues dans le moniteur série                                                                  
+    Serial.print(" "); // espace entre chaque octet
+    if(byte1 == 0x0A) LED_Message_OK = 1; // pour emettre un son BUZZER et allumer la LED blanche extérieure
+  }
+  digitalWrite(Chip_Select, HIGH); // remet la broche de sélection SPI à 1 pour arréter la communication avec le module LLCC68                                                                  
+  Serial.println();
+  Size = sizeof(standby); // acquisition taille du tableau des paramètres de la fonction standby, mettre le récepteur en attente (Standby)
+  transmit(standby, Size); // fonction de transmission pour mettre le module LLCC68 en mode veille
+  Serial.println(""); // aller à la ligne à la fin de l'affichage du message 
+}
+void Fsk_setup() {
+  Size = sizeof(standby); // met la taille du tableau dans la variable size
+  transmit(standby, Size); // fonction de transmission pour mettre en standby                                                               
+  Status(); // Obtenir le statut du module LLCC68                                                                                 
+  Size = sizeof(fsk); // met la taille du tableau dans la variable size
+  transmit(fsk, Size); // fonction de transmission pour paramétrer le mode FSK                                                                     
+  Size = sizeof(modulation_fsk);
+  transmit(modulation_fsk, Size); // fonction de transmission pour paramétrer la modulation du mode FSK                                                            
+  Size = sizeof(packet_params_fsk); // met la taille du tableau dans la variable size
+  transmit(packet_params_fsk, Size); // fonction de transmission pour le paramétrage des paquets du mode FSK                                                                
+  //  Size = sizeof(regulator); // met la taille du tableau dans la variable size
+  //  transmit(regulator, Size); // fonction de transmission pour la régulation DC DC avec le LDO                                                                  
+  Size = sizeof(frequency); // met la taille du tableau dans la variable size
+  transmit(frequency, Size); // fonction de transmission pour envoyer les paramètres de fréquence                                                               
+  Size = sizeof(calib_image); // met la taille du tableau dans la variable size
+  transmit(calib_image, Size); // fonction de transmission pour envoyer les paramètres d'étalonnage de l'image                                                              
+  //  Size = sizeof(pa_config); // met la taille du tableau dans la variable size
+  //  transmit(pa_config, Size); // fonction de transmission pour le control du PA                                                                 
+  Size = sizeof(dio2); // met la taille du tableau dans la variable size
+  transmit(dio2, Size); // fonction de transmission pour dio2 (contrôle du commutateur TX/RX)                                                                    
+  Status(); // Obtenir le statut du module LLCC68                                                                                 
+}
+void Lora_setup() {
+  Size = sizeof(standby); // met la taille du tableau dans la variable 
+  transmit(standby, Size); // fonction de transmission pour mettre en standby                                                                     
+  Status(); // Obtient le statut du module LLCC68                                                                                
+  Size = sizeof(lora); // met la taille du tableau dans la variable 
+  transmit(lora, Size); // fonction de transmission pour mettre le module LLCC68 en mode LORA                                                                       
+  Size = sizeof(modulation_lora); // met la taille du tableau dans la variable 
+  transmit(modulation_lora, Size); // fonction de transmission pour envoyer les paramètres de modulation LORA                                                            
+  Size = sizeof(packet_params_lora); // met la taille du tableau dans la variable 
+  transmit(packet_params_lora, Size); // fonction de transmission pour envoyer les paramètres du paquet                                                            
+  //  Size = sizeof(regulator); // met la taille du tableau dans la variable 
+  //  transmit(regulator, Size); // fonction de transmission pour envoyer les paramètres du régulateur DD DC LDO                                                                 
+  Size = sizeof(frequency); // met la taille du tableau dans la variable 
+  transmit(frequency, Size); // fonction de transmission pour envoyer les paramètres de fréquence                                                               
+  Size = sizeof(calib_image); // met la taille du tableau dans la variable 
+  transmit(calib_image, Size); // fonction de transmission pour envoyer les paramètres d'étalonnage de l'image                                                            
+  //  Size = sizeof(pa_config); // met la taille du tableau dans la variable 
+  //  transmit(pa_config, Size); // fonction de transmission pour envoyer les paramètres du PA                                                                  
+  Size = sizeof(dio2); // met la taille du tableau dans la variable 
+  transmit(dio2, Size); // fonction de transmission pour définir dio2 comme contrôle du commutateur TX/RX                                                                      
+}
+void transmit(byte Array[], int Size) { // Fonction TRANSMETTRE  puis rester le Chip_Select en HIGH    à la fin                                                  
+  busy(); // Vérifie si le module LLCC68 est occupé                                                                                   
+  digitalWrite(Chip_Select, LOW); // Met la broche de sélection du SPI à 0 pour communiquer via le SPI avec le module LLCC68                                                          
+  for (int i = 0; i < Size; i++) { // boucle pour parcourir chaque octet du tableau (Array)                                                      
+    SPI.transfer(Array[i]); // envoyer chaque octet au module LLCC68                                                                 
+    Serial.print(Array[i], HEX); // afficher chaque octet en HEXA sur le moniteur du PC                                                             
+    Serial.print(" "); // ajouter un séparateur entre chaque octet
+  }
+  digitalWrite(Chip_Select, HIGH); // Met la broche de sélection du SPI à 1 pour arréter la communication avec le module LLCC68                                                          
+  Serial.println(""); // saut de ligne à la fin
+}
+void transmit2(byte Array[], int Size) {  // Fonction TRANSMETTRE  mais laisser le Chip_Select en LOW à la fin                                                     
+  busy(); // Vérifie si le module LLCC68 est occupé                                                                                    
+  digitalWrite(Chip_Select, LOW); // Met la broche de sélection du SPI à 0 pour communiquer via le SPI avec le module LLCC68                                                           
+  for (int i = 0; i < Size; i++) { // boucle pour parcourir chaque octet du tableau (Array)                                                            
+    SPI.transfer(Array[i]); // envoyer chaque octet au module LLCC68                                                                  
+    Serial.print(Array[i], HEX); // afficher chaque octet en HEXA sur le moniteur du PC                                                             
+    Serial.print(" "); // ajouter un séparateur entre chaque octet
+  }
+  Serial.println(""); // saut de ligne à la fin
+}
+void Status(){ // Fonction obtenir l'état du module LLCC68                                                                             
+  Size = sizeof(get_status); // met la taille du tableau dans la variable                                                                 
+  transmit(get_status, Size); // Appelle la fonction de transmission pour envoyer la commande get status   
+  Serial.print("Status : ");                                                        
+  digitalWrite(Chip_Select, LOW); // Met la broche de sélection du SPI à 0 pour communiquer via le SPI avec le module LLCC68                                                           
+  byte2 = SPI.transfer(0x00);// envoie un octet vide et stocke les données renvoyer en retour dans byte1                                                               
+  Serial.println(byte2, BIN); // Affiche les données reçues sur le moniteur série du PC                                                                      
+  digitalWrite(Chip_Select, HIGH); // Met la broche de sélection du SPI à 1 pour arréter la communication avec le module LLCC68                                                             
+}
+void Affichage_GetRssi(){ // Fonction pour obtenir l'état de réception (RSSI moyen, SNR et RSSI instantané) du signal en entrée du module LLCC68                                                                            
+  digitalWrite(Chip_Select, LOW); // Met la broche de sélection du SPI à 0 pour démarrer la communication avec le module LLCC68  
+  Serial.println(""); // ajouter un séparateur entre chaque octet
+    busy(); // Vérifie que le module LLCC68 n'est pas occupé                                                                                  
+    Size = sizeof(GetPacketStatus); // met la taille du tableau dans la variable                                                               
+    transmit2(GetPacketStatus, Size); // Appelle la fonction de transmission pour envoyer la commande GetPacketStatus en restant sur LOW    
+    SPI.transfer(ReadBuffer); // Envoie la commande de lecture du Buffer (dépent du nombre d'octets envoyés)
+    Serial.print("moyenne RSSI sur le dernier paquet : -"); // affichage sur le moniteur série du PC
+    byte1 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer 
+    byte2 = byte1 / 2; // division par deux
+    Serial.print(byte2); // affichage de la valeur du RSSI moyen sur le moniteur série du PC
+    Serial.println(" dBm");
+    Serial.print("moyenne du rapport signal sur bruit (SNR) sur le dernier paquet : "); // affichage sur le moniteur série du PC
+    byte1 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer 
+    byte2 = ~byte1; // complément 1 devient 0 et 0 devient 1
+    byte3 = byte2 + 1; // ajouter 1, on obtient le complément à 2  
+    byte4 = byte3 / 4; // après extraction du complément à 2, on obtient le rapport signal/bruit
+    Serial.print(byte4); // affichage de la valeur du RSSI moyen sur le moniteur série du PC 
+    Serial.println(" dB");
+    Serial.print("RSSI du dernier paquet recu (après de-etalement) : -"); // affichage sur le moniteur série du PC
+    byte2 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer  
+    byte3 = byte2 / 2; // division par deux
+    Serial.print(byte3); // affichage de la valeur du RSSI moyen sur le moniteur série du PC 
+  digitalWrite(Chip_Select, HIGH);  // Met la broche de sélection du SPI à 1 pour arréter la communication avec le module LLCC68
+  Serial.println(" dB"); // ajouter un séparateur entre chaque octet                                                      
+}
+void Affichage_GetRssiInst(){  // Fonction pour obtenir le RSSI instantané                                                                             
+  digitalWrite(Chip_Select, LOW); // Met la broche de sélection du SPI à 0 pour démarrer la communication avec le module LLCC68   
+  Serial.println(""); // ajouter un séparateur entre chaque octet
+    busy(); // Vérifie que le module LLCC68 n'est pas occupé                                                                                
+    Size = sizeof(GetRssiInst); // met la taille du tableau dans la variable                                                                  
+    transmit2(GetRssiInst, Size); // Appelle la fonction de transmission pour envoyer la commande GetPacketStatus en restant sur LOW   
+    SPI.transfer(ReadBuffer); // Envoie la commande de lecture du Buffer (dépent du nombre d'octets envoyés) 
+    Serial.print("RSSI  de la dernière transmission SPI : -"); // affichage sur le moniteur série du PC 
+    byte2 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer
+    byte3 = byte2 / 2; // division par deux
+    Serial.print(byte3); // affichage de la valeur du RSSI instantanee sur le moniteur série du PC 
+    Serial.println(" dBm");
+    Serial.print("valeur normal de réception du SPI : 127dBm");
+  digitalWrite(Chip_Select, HIGH); // Met la broche de sélection du SPI à 1 pour arréter la communication avec le module LLCC68                                                          
+  Serial.println(""); // ajouter un séparateur entre chaque octet 
+}
+void Affichage_GetStats(){ // Fonction pour obtenir les statistiques de réception du module LLCC68 
+  digitalWrite(Chip_Select, LOW); // Met la broche de sélection du SPI à 0 pour démarrer la communication avec le module LLCC68                                                                             
+  Serial.println(""); // ajouter un séparateur entre chaque octet
+    busy(); // Vérifie que le module LLCC68 n'est pas occupé                                                                                  
+    Size = sizeof(GetStats); // Obtient la taille du tableau                                                                
+    transmit2(GetStats, Size); // Appelle la fonction de transmission pour envoyer la commande GetPacketStatus en restant sur LOW  
+    SPI.transfer(ReadBuffer); // Envoie la commande de lecture du Buffer (dépent du nombre d'octets envoyés)                                                                 
+    Serial.print("Nombre total de paquet recu : "); // affichage sur le moniteur série du PC 
+    byte2 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer  
+    byte3 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du deuxième octet du buffer
+    Serial.print(byte2); // affichage sur le moniteur série du PC  
+    Serial.println(byte3); // affichage sur le moniteur série du PC 
+    Serial.print("Nombre total de paquet recu avec erreur (CRC) : "); // affichage sur le moniteur série du PC 
+    byte2 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer  
+    byte3 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du deuxième octet du buffer
+    Serial.print(byte2); // affichage sur le moniteur série du PC  
+    Serial.println(byte3); // affichage sur le moniteur série du PC 
+    Serial.print("Nombre total de paquet recu avec erreur (d'entete) : "); // affichage sur le moniteur série du PC 
+    byte2 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer  
+    byte3 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du deuxième octet du buffer
+    Serial.print(byte2); // affichage sur le moniteur série du PC  
+    Serial.println(byte3); // affichage sur le moniteur série du PC 
+  digitalWrite(Chip_Select, HIGH); // Met la broche de sélection du SPI à 1 pour arréter la communication avec le module LLCC68                                                           
+  Serial.println(""); // ajouter un séparateur entre chaque octet                                                               
+}
+void RAZ_ResetStats(){ // Remise à zéro des statistiques de réception du module LLCC68                                                                              
+  Size = sizeof(ResetStats); // Obtient la taille du tableau                                                                 
+  transmit(ResetStats, Size); // Appelle la fonction de transmission pour envoyer la commande                                                                
+      Serial.println(""); // ajouter un séparateur entre chaque octet   
+}
+void Affichage_GetRxBufferStatus(){ // longueur du dernier message reçu et la valeur du pointeur du premier octet dans le buffer                                                                              
+  digitalWrite(Chip_Select, LOW); // Met la broche de sélection du SPI à 0 pour démarrer la communication avec le module LLCC68  
+  Serial.println(""); // ajouter un séparateur entre chaque octet 
+    busy();// Vérifie que le module LLCC68 n'est pas occupé                                                                                  
+    Size = sizeof(GetRxBufferStatus); // Obtient la taille du tableau                                                                
+    transmit2(GetRxBufferStatus, Size); // Appelle la fonction de transmission pour envoyer la commande GetPacketStatus en restant sur LOW  
+    SPI.transfer(ReadBuffer); // Envoie la commande de lecture du Buffer (dépent du nombre d'octets envoyés)                                                                   
+    Serial.print("Longueur du dernier paquet recu : "); // affichage sur le moniteur série du PC      
+    byte2 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer  
+    Serial.println(byte2, HEX); // affichage en HEXA sur le moniteur série du PC   
+    Serial.print("Offset du premier octet du dernier paquet (Buffer) : ");  // affichage sur le moniteur série du PC  
+    byte3 = SPI.transfer(0x00); // envoi d'un octet NOP et retour du premier octet du buffer 
+    Serial.println(byte3, HEX); // affichage en HEXA sur le moniteur série du PC   
+  digitalWrite(Chip_Select, HIGH); // Met la broche de sélection du SPI à 1 pour arréter la communication avec le module LLCC68                                                           
+  Serial.println(""); // ajouter un séparateur entre chaque octet                                                                
+}
